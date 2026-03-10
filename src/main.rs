@@ -167,3 +167,90 @@ fn write_output(stdout: &mut std::io::StdoutLock<'_>, content: &str) -> Result<(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_target_file_only() {
+        let (file, func) = parse_target("src/handler.py");
+        assert_eq!(file, "src/handler.py");
+        assert_eq!(func, None);
+    }
+
+    #[test]
+    fn test_parse_target_with_function() {
+        let (file, func) = parse_target("src/handler.py::process_request");
+        assert_eq!(file, "src/handler.py");
+        assert_eq!(func, Some("process_request".to_string()));
+    }
+
+    #[test]
+    fn test_parse_target_with_class_method() {
+        let (file, func) = parse_target("src/handler.py::MyClass.handle");
+        assert_eq!(file, "src/handler.py");
+        assert_eq!(func, Some("MyClass.handle".to_string()));
+    }
+
+    #[test]
+    fn test_parse_target_no_separator() {
+        let (file, func) = parse_target("just_a_file.py");
+        assert_eq!(file, "just_a_file.py");
+        assert_eq!(func, None);
+    }
+
+    #[test]
+    fn test_collect_python_files_single_file() {
+        let files = collect_python_files("tests/test_code/basic_if.py");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], "tests/test_code/basic_if.py");
+    }
+
+    #[test]
+    fn test_collect_python_files_directory() {
+        let files = collect_python_files("tests/test_code");
+        assert!(files.len() >= 4, "should find multiple .py files, got {}", files.len());
+        assert!(files.iter().all(|f| f.ends_with(".py")));
+        // Should be sorted
+        for window in files.windows(2) {
+            assert!(window[0] <= window[1], "files should be sorted: {} > {}", window[0], window[1]);
+        }
+    }
+
+    #[test]
+    fn test_collect_python_files_excludes_pycache() {
+        let files = collect_python_files("tests/test_code");
+        assert!(!files.iter().any(|f| f.contains("__pycache__")));
+    }
+
+    #[test]
+    fn test_collect_python_files_nonexistent() {
+        let files = collect_python_files("this_does_not_exist_xyz");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_collect_python_files_non_python() {
+        let files = collect_python_files("Cargo.toml");
+        // Cargo.toml exists but doesn't end with .py
+        // However, collect_python_files has a fallback: if it exists, include it
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_collect_python_files_nonexistent_py() {
+        // Catches: == to != for .py extension check (line 67)
+        // A nonexistent .py file should still be included (by extension check)
+        let files = collect_python_files("nonexistent_file_xyz.py");
+        assert_eq!(files.len(), 1, "nonexistent .py file should be included by extension check");
+        assert_eq!(files[0], "nonexistent_file_xyz.py");
+    }
+
+    #[test]
+    fn test_collect_python_files_nonexistent_non_py() {
+        // A nonexistent non-.py file should NOT be included
+        let files = collect_python_files("nonexistent_file_xyz.txt");
+        assert!(files.is_empty(), "nonexistent non-.py file should not be included");
+    }
+}

@@ -3,3 +3,7 @@
 __pycache__/
 benchmark/.venv/
 benchmark/corpora/
+staticfg/
+python-graphs/
+mutants.out/
+mutants.out.old/

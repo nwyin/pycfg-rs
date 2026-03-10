@@ -34,7 +34,7 @@ pub fn write_dot(file_cfg: &FileCfg) -> String {
     out
 }
 
-fn write_dot_function(out: &mut String, func: &FunctionCfg) {
+pub fn write_dot_function(out: &mut String, func: &FunctionCfg) {
     let prefix = func.name.replace('.', "_");
     writeln!(out, "    subgraph cluster_{prefix} {{").unwrap();
     writeln!(out, "        label=\"{}\";", func.name).unwrap();
