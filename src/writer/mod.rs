@@ -161,15 +161,7 @@ fn write_dot_function_with_prefix(
     // Edges
     for block in &func.blocks {
         for edge in &block.successors {
-            let color = match edge.label.as_str() {
-                "True" => "green",
-                "False" => "red",
-                "return" => "blue",
-                "exception" | "raise" | "assert-fail" => "orange",
-                "break" => "purple",
-                "continue" => "cyan",
-                _ => "black",
-            };
+            let color = edge.label.dot_color();
             writeln!(
                 out,
                 "{indent}    {prefix}_{src} -> {prefix}_{tgt} [label=\"{label}\", color={color}];",

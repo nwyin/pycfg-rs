@@ -615,6 +615,45 @@ impl<'src> CfgBuilder<'src> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::CfgBuilder;
+    use crate::cfg::{BlockKind, EdgeKind};
+
+    #[test]
+    fn remove_edge_requires_matching_target_and_label() {
+        let mut builder = CfgBuilder::new("", false);
+        let from = builder.new_block(BlockKind::Body);
+        let shared_target = builder.new_block(BlockKind::Body);
+        let other_target = builder.new_block(BlockKind::Body);
+
+        builder.add_edge(from, shared_target, EdgeKind::True);
+        builder.add_edge(from, shared_target, EdgeKind::LoopExit);
+        builder.add_edge(from, other_target, EdgeKind::LoopExit);
+
+        builder.remove_edge(from, shared_target, EdgeKind::LoopExit);
+
+        assert!(
+            builder.blocks[from]
+                .successors
+                .iter()
+                .any(|edge| edge.target == shared_target && edge.label == EdgeKind::True)
+        );
+        assert!(
+            !builder.blocks[from]
+                .successors
+                .iter()
+                .any(|edge| edge.target == shared_target && edge.label == EdgeKind::LoopExit)
+        );
+        assert!(
+            builder.blocks[from]
+                .successors
+                .iter()
+                .any(|edge| edge.target == other_target && edge.label == EdgeKind::LoopExit)
+        );
+    }
+}
+
 pub(crate) fn build_single_cfg(
     source: &str,
     name: &str,

@@ -251,3 +251,43 @@ impl fmt::Display for FunctionCfg {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::EdgeKind;
+
+    #[test]
+    fn edge_kind_from_preserves_case_labels() {
+        assert!(matches!(
+            EdgeKind::from("case _"),
+            EdgeKind::Case(label) if label == "case _"
+        ));
+        assert!(matches!(
+            EdgeKind::from("custom-edge"),
+            EdgeKind::Other(label) if label == "custom-edge"
+        ));
+    }
+
+    #[test]
+    fn edge_kind_display_matches_rendered_label() {
+        assert_eq!(EdgeKind::Break.to_string(), "break");
+        assert_eq!(
+            EdgeKind::Case("case ready".to_string()).to_string(),
+            "case ready"
+        );
+    }
+
+    #[test]
+    fn edge_kind_dot_color_matches_semantics() {
+        assert_eq!(EdgeKind::True.dot_color(), "green");
+        assert_eq!(EdgeKind::False.dot_color(), "red");
+        assert_eq!(EdgeKind::Return.dot_color(), "blue");
+        assert_eq!(EdgeKind::Exception.dot_color(), "orange");
+        assert_eq!(EdgeKind::Raise.dot_color(), "orange");
+        assert_eq!(EdgeKind::AssertFail.dot_color(), "orange");
+        assert_eq!(EdgeKind::Break.dot_color(), "purple");
+        assert_eq!(EdgeKind::Continue.dot_color(), "cyan");
+        assert_eq!(EdgeKind::Case("case _".to_string()).dot_color(), "black");
+        assert_eq!(EdgeKind::Other("custom".to_string()).dot_color(), "black");
+    }
+}
