@@ -1,6 +1,6 @@
 use ruff_python_ast::{self as ast, Stmt};
 use ruff_python_parser::{Mode, ParseOptions};
-use ruff_text_size::Ranged;
+use ruff_text_size::{Ranged, TextSize};
 use serde::Serialize;
 use std::fmt;
 
@@ -92,7 +92,10 @@ impl fmt::Display for FunctionCfg {
         writeln!(
             f,
             "  # blocks={} edges={} branches={} cyclomatic_complexity={}",
-            self.metrics.blocks, self.metrics.edges, self.metrics.branches, self.metrics.cyclomatic_complexity
+            self.metrics.blocks,
+            self.metrics.edges,
+            self.metrics.branches,
+            self.metrics.cyclomatic_complexity
         )
     }
 }
@@ -357,7 +360,11 @@ impl<'src> CfgBuilder<'src> {
 
     fn build_for(&mut self, for_stmt: &ast::StmtFor, current: usize, exit: usize) -> Option<usize> {
         let line = self.offset_to_line(for_stmt.range().start());
-        let prefix = if for_stmt.is_async { "async for" } else { "for" };
+        let prefix = if for_stmt.is_async {
+            "async for"
+        } else {
+            "for"
+        };
         let iter_text = format!(
             "{} {} in {}:",
             prefix,
@@ -397,7 +404,12 @@ impl<'src> CfgBuilder<'src> {
         Some(exit_block)
     }
 
-    fn build_while(&mut self, while_stmt: &ast::StmtWhile, current: usize, exit: usize) -> Option<usize> {
+    fn build_while(
+        &mut self,
+        while_stmt: &ast::StmtWhile,
+        current: usize,
+        exit: usize,
+    ) -> Option<usize> {
         let line = self.offset_to_line(while_stmt.range().start());
         let test_text = format!("while {}:", self.range_text(while_stmt.test.range()));
         self.add_stmt(current, line, &test_text);
@@ -433,7 +445,12 @@ impl<'src> CfgBuilder<'src> {
         Some(exit_block)
     }
 
-    fn build_return(&mut self, ret_stmt: &ast::StmtReturn, current: usize, exit: usize) -> Option<usize> {
+    fn build_return(
+        &mut self,
+        ret_stmt: &ast::StmtReturn,
+        current: usize,
+        exit: usize,
+    ) -> Option<usize> {
         let line = self.offset_to_line(ret_stmt.range().start());
         let text = if let Some(ref value) = ret_stmt.value {
             format!("return {}", self.range_text(value.range()))
@@ -556,7 +573,12 @@ impl<'src> CfgBuilder<'src> {
         }
     }
 
-    fn build_with(&mut self, with_stmt: &ast::StmtWith, current: usize, exit: usize) -> Option<usize> {
+    fn build_with(
+        &mut self,
+        with_stmt: &ast::StmtWith,
+        current: usize,
+        exit: usize,
+    ) -> Option<usize> {
         let line = self.offset_to_line(with_stmt.range().start());
         let items_text: Vec<String> = with_stmt
             .items
@@ -570,14 +592,23 @@ impl<'src> CfgBuilder<'src> {
                 }
             })
             .collect();
-        let prefix = if with_stmt.is_async { "async with" } else { "with" };
+        let prefix = if with_stmt.is_async {
+            "async with"
+        } else {
+            "with"
+        };
         let text = format!("{} {}:", prefix, items_text.join(", "));
         self.add_stmt(current, line, &text);
 
         self.build_stmts(&with_stmt.body, current, exit)
     }
 
-    fn build_match(&mut self, match_stmt: &ast::StmtMatch, current: usize, exit: usize) -> Option<usize> {
+    fn build_match(
+        &mut self,
+        match_stmt: &ast::StmtMatch,
+        current: usize,
+        exit: usize,
+    ) -> Option<usize> {
         let line = self.offset_to_line(match_stmt.range().start());
         let subject_text = format!("match {}:", self.range_text(match_stmt.subject.range()));
         self.add_stmt(current, line, &subject_text);
@@ -599,7 +630,12 @@ impl<'src> CfgBuilder<'src> {
         Some(merge_block)
     }
 
-    fn build_raise(&mut self, raise_stmt: &ast::StmtRaise, current: usize, exit: usize) -> Option<usize> {
+    fn build_raise(
+        &mut self,
+        raise_stmt: &ast::StmtRaise,
+        current: usize,
+        exit: usize,
+    ) -> Option<usize> {
         let line = self.offset_to_line(raise_stmt.range().start());
         let text = if let Some(ref exc) = raise_stmt.exc {
             format!("raise {}", self.range_text(exc.range()))
@@ -680,6 +716,57 @@ pub struct CfgOptions {
     pub explicit_exceptions: bool,
 }
 
+struct FunctionVisit<'a> {
+    qualified_name: String,
+    leaf_name: String,
+    line: usize,
+    body: &'a [Stmt],
+}
+
+fn visit_functions<'a, F>(source: &str, stmts: &'a [Stmt], visit: &mut F)
+where
+    F: FnMut(FunctionVisit<'a>),
+{
+    visit_scope(source, stmts, "", visit);
+}
+
+fn visit_scope<'a, F>(source: &str, stmts: &'a [Stmt], prefix: &str, visit: &mut F)
+where
+    F: FnMut(FunctionVisit<'a>),
+{
+    for stmt in stmts {
+        match stmt {
+            Stmt::FunctionDef(func_def) => {
+                let qualified_name = qualify_name(prefix, func_def.name.as_str());
+                visit(FunctionVisit {
+                    qualified_name: qualified_name.clone(),
+                    leaf_name: func_def.name.to_string(),
+                    line: line_from_offset(source, func_def.range().start()),
+                    body: &func_def.body,
+                });
+                visit_scope(source, &func_def.body, &qualified_name, visit);
+            }
+            Stmt::ClassDef(class_def) => {
+                let class_prefix = qualify_name(prefix, class_def.name.as_str());
+                visit_scope(source, &class_def.body, &class_prefix, visit);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn qualify_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
+}
+
+fn line_from_offset(source: &str, offset: TextSize) -> usize {
+    source[..offset.to_usize()].lines().count().max(1)
+}
+
 pub fn build_cfgs(source: &str, filename: &str, options: &CfgOptions) -> FileCfg {
     let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
     let module = parsed.into_syntax();
@@ -696,7 +783,15 @@ pub fn build_cfgs(source: &str, filename: &str, options: &CfgOptions) -> FileCfg
     };
 
     let mut functions = Vec::new();
-    collect_functions(source, &stmts, &mut functions, options);
+    visit_functions(source, &stmts, &mut |function| {
+        functions.push(build_single_cfg(
+            source,
+            &function.qualified_name,
+            function.line,
+            function.body,
+            options,
+        ));
+    });
 
     let has_top_level_code = stmts.iter().any(|s| {
         !matches!(
@@ -730,137 +825,36 @@ pub fn build_cfg_for_function(
         ast::Mod::Expression(_) => return None,
     };
 
-    let mut result = Vec::new();
-    find_function(source, &stmts, function_name, &mut result, options, "");
+    let mut functions = Vec::new();
+    visit_functions(source, &stmts, &mut |function| {
+        if function.qualified_name == function_name || function.leaf_name == function_name {
+            functions.push(build_single_cfg(
+                source,
+                &function.qualified_name,
+                function.line,
+                function.body,
+                options,
+            ));
+        }
+    });
 
-    if result.is_empty() {
+    if functions.is_empty() {
         None
     } else {
         Some(FileCfg {
             file: filename.to_string(),
-            functions: result,
+            functions,
         })
     }
 }
 
-fn find_function(
+fn build_single_cfg(
     source: &str,
-    stmts: &[Stmt],
-    target: &str,
-    result: &mut Vec<FunctionCfg>,
+    name: &str,
+    line: usize,
+    body: &[Stmt],
     options: &CfgOptions,
-    prefix: &str,
-) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::FunctionDef(func_def) => {
-                let qualified = if prefix.is_empty() {
-                    func_def.name.to_string()
-                } else {
-                    format!("{}.{}", prefix, func_def.name)
-                };
-                if qualified == target || func_def.name.as_str() == target {
-                    let line = source[..func_def.range().start().to_usize()]
-                        .lines()
-                        .count()
-                        .max(1);
-                    let cfg = build_single_cfg(source, &qualified, line, &func_def.body, options);
-                    result.push(cfg);
-                }
-                find_function(source, &func_def.body, target, result, options, &qualified);
-            }
-            Stmt::ClassDef(class_def) => {
-                let class_prefix = if prefix.is_empty() {
-                    class_def.name.to_string()
-                } else {
-                    format!("{}.{}", prefix, class_def.name)
-                };
-                find_function(source, &class_def.body, target, result, options, &class_prefix);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_functions(source: &str, stmts: &[Stmt], functions: &mut Vec<FunctionCfg>, options: &CfgOptions) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::FunctionDef(func_def) => {
-                let line = source[..func_def.range().start().to_usize()]
-                    .lines()
-                    .count()
-                    .max(1);
-                let name = func_def.name.to_string();
-                let cfg = build_single_cfg(source, &name, line, &func_def.body, options);
-                functions.push(cfg);
-                collect_nested_functions(source, &func_def.body, functions, options, &name);
-            }
-            Stmt::ClassDef(class_def) => {
-                let class_name = class_def.name.to_string();
-                collect_class_methods(source, &class_def.body, functions, options, &class_name);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_class_methods(
-    source: &str,
-    stmts: &[Stmt],
-    functions: &mut Vec<FunctionCfg>,
-    options: &CfgOptions,
-    class_name: &str,
-) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::FunctionDef(func_def) => {
-                let line = source[..func_def.range().start().to_usize()]
-                    .lines()
-                    .count()
-                    .max(1);
-                let qualified = format!("{}.{}", class_name, func_def.name);
-                let cfg = build_single_cfg(source, &qualified, line, &func_def.body, options);
-                functions.push(cfg);
-                collect_nested_functions(source, &func_def.body, functions, options, &qualified);
-            }
-            Stmt::ClassDef(class_def) => {
-                let nested_name = format!("{}.{}", class_name, class_def.name);
-                collect_class_methods(source, &class_def.body, functions, options, &nested_name);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_nested_functions(
-    source: &str,
-    stmts: &[Stmt],
-    functions: &mut Vec<FunctionCfg>,
-    options: &CfgOptions,
-    prefix: &str,
-) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::FunctionDef(func_def) => {
-                let line = source[..func_def.range().start().to_usize()]
-                    .lines()
-                    .count()
-                    .max(1);
-                let qualified = format!("{}.{}", prefix, func_def.name);
-                let cfg = build_single_cfg(source, &qualified, line, &func_def.body, options);
-                functions.push(cfg);
-                collect_nested_functions(source, &func_def.body, functions, options, &qualified);
-            }
-            Stmt::ClassDef(class_def) => {
-                let class_qualified = format!("{}.{}", prefix, class_def.name);
-                collect_class_methods(source, &class_def.body, functions, options, &class_qualified);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn build_single_cfg(source: &str, name: &str, line: usize, body: &[Stmt], options: &CfgOptions) -> FunctionCfg {
+) -> FunctionCfg {
     let mut builder = CfgBuilder::new(source, options.explicit_exceptions);
 
     let entry = builder.new_block("entry");
@@ -902,7 +896,8 @@ mod tests {
 
     #[test]
     fn test_if_else() {
-        let source = "def foo(x):\n    if x > 0:\n        y = 1\n    else:\n        y = 2\n    return y\n";
+        let source =
+            "def foo(x):\n    if x > 0:\n        y = 1\n    else:\n        y = 2\n    return y\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         assert!(func.metrics.branches > 0);
@@ -927,8 +922,7 @@ mod tests {
 
     #[test]
     fn test_break_continue() {
-        let source =
-            "def foo():\n    for i in range(10):\n        if i == 5:\n            break\n        if i % 2 == 0:\n            continue\n        print(i)\n";
+        let source = "def foo():\n    for i in range(10):\n        if i == 5:\n            break\n        if i % 2 == 0:\n            continue\n        print(i)\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         assert!(func.metrics.branches >= 2);
@@ -951,8 +945,7 @@ mod tests {
 
     #[test]
     fn test_nested_control_flow() {
-        let source =
-            "def foo(x, y):\n    if x > 0:\n        for i in range(y):\n            if i > x:\n                break\n    return 0\n";
+        let source = "def foo(x, y):\n    if x > 0:\n        for i in range(y):\n            if i > x:\n                break\n    return 0\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         assert!(func.metrics.cyclomatic_complexity >= 3);
@@ -980,13 +973,17 @@ mod tests {
     fn test_class_method() {
         let source = "class MyClass:\n    def my_method(self):\n        return self.x\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
-        assert!(result.functions.iter().any(|f| f.name == "MyClass.my_method"));
+        assert!(
+            result
+                .functions
+                .iter()
+                .any(|f| f.name == "MyClass.my_method")
+        );
     }
 
     #[test]
     fn test_try_except() {
-        let source =
-            "def foo():\n    try:\n        x = risky()\n    except ValueError:\n        x = 0\n    return x\n";
+        let source = "def foo():\n    try:\n        x = risky()\n    except ValueError:\n        x = 0\n    return x\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         let has_exception_edge = func
@@ -1048,7 +1045,11 @@ mod tests {
             .filter(|e| e.label == "exception")
             .count();
         // Multiple blocks inside try, each should have exception edges
-        assert!(exception_edges >= 2, "expected >= 2 exception edges, got {}", exception_edges);
+        assert!(
+            exception_edges >= 2,
+            "expected >= 2 exception edges, got {}",
+            exception_edges
+        );
     }
 
     #[test]
@@ -1096,7 +1097,8 @@ mod tests {
 
     #[test]
     fn test_with_statement() {
-        let source = "def foo():\n    with open('f') as f:\n        data = f.read()\n    return data\n";
+        let source =
+            "def foo():\n    with open('f') as f:\n        data = f.read()\n    return data\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         let has_with = func
@@ -1202,7 +1204,10 @@ mod tests {
             .flat_map(|b| &b.successors)
             .filter(|e| e.label == "exception")
             .count();
-        assert_eq!(exception_edges, 3, "should have 3 exception edges (one per handler)");
+        assert_eq!(
+            exception_edges, 3,
+            "should have 3 exception edges (one per handler)"
+        );
     }
 
     #[test]
@@ -1230,7 +1235,11 @@ mod tests {
             .filter(|e| e.label == "exception")
             .count();
         // Inner try has 1 exception edge, outer try has 1 = 2 total
-        assert!(exception_edges >= 2, "expected >= 2, got {}", exception_edges);
+        assert!(
+            exception_edges >= 2,
+            "expected >= 2, got {}",
+            exception_edges
+        );
     }
 
     #[test]
@@ -1378,8 +1387,7 @@ mod tests {
 
     #[test]
     fn test_bare_raise() {
-        let source =
-            "def foo():\n    try:\n        risky()\n    except Exception:\n        log()\n        raise\n";
+        let source = "def foo():\n    try:\n        risky()\n    except Exception:\n        log()\n        raise\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         let has_raise = func
@@ -1446,22 +1454,19 @@ mod tests {
 
     #[test]
     fn test_async_for() {
-        let source =
-            "async def foo():\n    results = []\n    async for item in aiter:\n        results.append(item)\n    return results\n";
+        let source = "async def foo():\n    results = []\n    async for item in aiter:\n        results.append(item)\n    return results\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
-        let has_async_for = func.blocks.iter().any(|b| {
-            b.statements
-                .iter()
-                .any(|s| s.text.starts_with("async for"))
-        });
+        let has_async_for = func
+            .blocks
+            .iter()
+            .any(|b| b.statements.iter().any(|s| s.text.starts_with("async for")));
         assert!(has_async_for);
     }
 
     #[test]
     fn test_async_with() {
-        let source =
-            "async def foo():\n    async with session() as s:\n        data = await s.fetch()\n    return data\n";
+        let source = "async def foo():\n    async with session() as s:\n        data = await s.fetch()\n    return data\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         let has_async_with = func.blocks.iter().any(|b| {
@@ -1518,11 +1523,17 @@ mod tests {
         let source = "class Outer:\n    class Inner:\n        def method(self):\n            return 42\n    def outer_method(self):\n        return 0\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         assert!(
-            result.functions.iter().any(|f| f.name == "Outer.Inner.method"),
+            result
+                .functions
+                .iter()
+                .any(|f| f.name == "Outer.Inner.method"),
             "should find nested class method"
         );
         assert!(
-            result.functions.iter().any(|f| f.name == "Outer.outer_method"),
+            result
+                .functions
+                .iter()
+                .any(|f| f.name == "Outer.outer_method"),
             "should find outer class method"
         );
     }
@@ -1543,8 +1554,7 @@ mod tests {
 
     #[test]
     fn test_multiple_with_items() {
-        let source =
-            "def foo():\n    with open('a') as a, open('b') as b:\n        data = a.read() + b.read()\n    return data\n";
+        let source = "def foo():\n    with open('a') as a, open('b') as b:\n        data = a.read() + b.read()\n    return data\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         let with_stmt = func
@@ -1553,7 +1563,10 @@ mod tests {
             .flat_map(|b| &b.statements)
             .find(|s| s.text.starts_with("with "))
             .unwrap();
-        assert!(with_stmt.text.contains(", "), "should show both context managers");
+        assert!(
+            with_stmt.text.contains(", "),
+            "should show both context managers"
+        );
     }
 
     #[test]
@@ -1622,7 +1635,11 @@ mod tests {
             .flat_map(|b| &b.successors)
             .filter(|e| e.target == exit_id && e.label == "return")
             .count();
-        assert!(return_edges >= 4, "expected >= 4 return paths, got {}", return_edges);
+        assert!(
+            return_edges >= 4,
+            "expected >= 4 return paths, got {}",
+            return_edges
+        );
     }
 
     #[test]
@@ -1651,8 +1668,7 @@ mod tests {
     #[test]
     fn test_function_targeting_class_method() {
         let source = "class Foo:\n    def bar(self):\n        return 1\n    def baz(self):\n        return 2\n";
-        let result =
-            build_cfg_for_function(source, "test.py", "Foo.bar", &CfgOptions::default());
+        let result = build_cfg_for_function(source, "test.py", "Foo.bar", &CfgOptions::default());
         assert!(result.is_some());
         let file_cfg = result.unwrap();
         assert_eq!(file_cfg.functions.len(), 1);
@@ -1776,16 +1792,29 @@ mod tests {
         let func = &result.functions[0];
         let exit_id = func.blocks.iter().find(|b| b.label == "exit").unwrap().id;
         let entry = &func.blocks[0];
-        let has_assert_fail = entry.successors.iter().any(|e| e.target == exit_id && e.label == "assert-fail");
-        let has_return = entry.successors.iter().any(|e| e.target == exit_id && e.label == "return");
-        assert!(has_assert_fail, "entry should have assert-fail edge to exit");
-        assert!(has_return, "entry should also have return edge to exit (same target, different label)");
+        let has_assert_fail = entry
+            .successors
+            .iter()
+            .any(|e| e.target == exit_id && e.label == "assert-fail");
+        let has_return = entry
+            .successors
+            .iter()
+            .any(|e| e.target == exit_id && e.label == "return");
+        assert!(
+            has_assert_fail,
+            "entry should have assert-fail edge to exit"
+        );
+        assert!(
+            has_return,
+            "entry should also have return edge to exit (same target, different label)"
+        );
     }
 
     #[test]
     fn test_expression_mode() {
         // Expression mode should still produce a FileCfg
-        let parsed = ruff_python_parser::parse_unchecked("1 + 2", ParseOptions::from(Mode::Expression));
+        let parsed =
+            ruff_python_parser::parse_unchecked("1 + 2", ParseOptions::from(Mode::Expression));
         let module = parsed.into_syntax();
         assert!(matches!(module, ast::Mod::Expression(_)));
     }
@@ -1802,19 +1831,31 @@ mod tests {
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         // Find the try body block — it should have 3 exception edges to 3 different handlers
-        let try_body = func.blocks.iter().find(|b| {
-            b.successors.iter().any(|e| e.label == "exception")
-        }).expect("should have a block with exception edges");
-        let exc_targets: Vec<usize> = try_body.successors.iter()
+        let try_body = func
+            .blocks
+            .iter()
+            .find(|b| b.successors.iter().any(|e| e.label == "exception"))
+            .expect("should have a block with exception edges");
+        let exc_targets: Vec<usize> = try_body
+            .successors
+            .iter()
             .filter(|e| e.label == "exception")
             .map(|e| e.target)
             .collect();
-        assert_eq!(exc_targets.len(), 3, "need 3 exception edges with same label to different targets");
+        assert_eq!(
+            exc_targets.len(),
+            3,
+            "need 3 exception edges with same label to different targets"
+        );
         // All targets should be different
         let mut unique = exc_targets.clone();
         unique.sort();
         unique.dedup();
-        assert_eq!(unique.len(), 3, "all 3 exception targets should be different blocks");
+        assert_eq!(
+            unique.len(),
+            3,
+            "all 3 exception targets should be different blocks"
+        );
     }
 
     #[test]
@@ -1823,13 +1864,23 @@ mod tests {
         let source = "def foo():\n    x = 1\n    y = 2\n    z = 3\n    return z\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
-        let lines: Vec<usize> = func.blocks.iter()
+        let lines: Vec<usize> = func
+            .blocks
+            .iter()
             .flat_map(|b| &b.statements)
             .map(|s| s.line)
             .collect();
         // Statements are on lines 2, 3, 4, 5
-        assert!(lines.iter().any(|&l| l >= 3), "should have lines >= 3, got {:?}", lines);
-        assert!(lines.iter().any(|&l| l >= 4), "should have lines >= 4, got {:?}", lines);
+        assert!(
+            lines.iter().any(|&l| l >= 3),
+            "should have lines >= 3, got {:?}",
+            lines
+        );
+        assert!(
+            lines.iter().any(|&l| l >= 4),
+            "should have lines >= 4, got {:?}",
+            lines
+        );
     }
 
     #[test]
@@ -1840,8 +1891,14 @@ mod tests {
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         // The if/else inside with should create branches
-        assert!(func.metrics.branches >= 1, "with body should be processed, creating branches");
-        assert!(func.metrics.cyclomatic_complexity >= 2, "with body if/else should increase CC");
+        assert!(
+            func.metrics.branches >= 1,
+            "with body should be processed, creating branches"
+        );
+        assert!(
+            func.metrics.cyclomatic_complexity >= 2,
+            "with body if/else should increase CC"
+        );
     }
 
     #[test]
@@ -1852,20 +1909,28 @@ mod tests {
         // Put ONLY a def inside the try body — no other statements — so the def
         // is the only thing that could add exception edges.
         let source = "def foo():\n    try:\n        def inner():\n            pass\n    except ValueError:\n        pass\n";
-        let opts = CfgOptions { explicit_exceptions: true };
+        let opts = CfgOptions {
+            explicit_exceptions: true,
+        };
         let result = build_cfgs(source, "test.py", &opts);
         let func = &result.functions[0];
         // Find the try body block (the one after try: with the def inner statement)
-        let def_block = func.blocks.iter().find(|b| {
-            b.statements.iter().any(|s| s.text.starts_with("def inner"))
-        }).expect("should have block with def inner");
+        let def_block = func
+            .blocks
+            .iter()
+            .find(|b| b.statements.iter().any(|s| s.text.starts_with("def inner")))
+            .expect("should have block with def inner");
         // With the FunctionDef arm: no exception edges (def is not risky)
         // With the _ fallback: exception edges would be added
-        let exc_edges = def_block.successors.iter()
+        let exc_edges = def_block
+            .successors
+            .iter()
             .filter(|e| e.label == "exception")
             .count();
-        assert_eq!(exc_edges, 0,
-            "def/class defs should not get exception edges even with explicit_exceptions");
+        assert_eq!(
+            exc_edges, 0,
+            "def/class defs should not get exception edges even with explicit_exceptions"
+        );
     }
 
     #[test]
@@ -1877,25 +1942,38 @@ mod tests {
         let func = &result.functions[0];
 
         // Find the header block (has the "for" statement)
-        let header = func.blocks.iter().find(|b| {
-            b.statements.iter().any(|s| s.text.starts_with("for "))
-        }).expect("should have for header");
+        let header = func
+            .blocks
+            .iter()
+            .find(|b| b.statements.iter().any(|s| s.text.starts_with("for ")))
+            .expect("should have for header");
 
         // loop-exit edge should go to the else block (which contains x = 'else')
-        let loop_exit_edge = header.successors.iter()
+        let loop_exit_edge = header
+            .successors
+            .iter()
             .find(|e| e.label == "loop-exit")
             .expect("header should have loop-exit edge");
 
         let target_block = &func.blocks[loop_exit_edge.target];
-        let has_else_stmt = target_block.statements.iter()
+        let has_else_stmt = target_block
+            .statements
+            .iter()
             .any(|s| s.text.contains("'else'") || s.text.contains("\"else\""));
-        assert!(has_else_stmt,
+        assert!(
+            has_else_stmt,
             "loop-exit should target else block with x = 'else', but targets block {} with stmts: {:?}",
-            target_block.id, target_block.statements);
+            target_block.id, target_block.statements
+        );
 
         // Also verify there's a fallthrough from else block to the merge block
-        assert!(target_block.successors.iter().any(|e| e.label == "fallthrough"),
-            "else block should have fallthrough to merge");
+        assert!(
+            target_block
+                .successors
+                .iter()
+                .any(|e| e.label == "fallthrough"),
+            "else block should have fallthrough to merge"
+        );
     }
 
     #[test]
@@ -1905,17 +1983,29 @@ mod tests {
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
 
-        let header = func.blocks.iter().find(|b| {
-            b.statements.iter().any(|s| s.text.starts_with("for "))
-        }).unwrap();
+        let header = func
+            .blocks
+            .iter()
+            .find(|b| b.statements.iter().any(|s| s.text.starts_with("for ")))
+            .unwrap();
 
         // Should have exactly loop-body and loop-exit edges
         assert_eq!(
-            header.successors.iter().filter(|e| e.label == "loop-exit").count(), 1,
+            header
+                .successors
+                .iter()
+                .filter(|e| e.label == "loop-exit")
+                .count(),
+            1,
             "for without else should have exactly 1 loop-exit edge"
         );
         assert_eq!(
-            header.successors.iter().filter(|e| e.label == "loop-body").count(), 1,
+            header
+                .successors
+                .iter()
+                .filter(|e| e.label == "loop-body")
+                .count(),
+            1,
             "for should have exactly 1 loop-body edge"
         );
     }
@@ -1927,25 +2017,40 @@ mod tests {
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
 
-        let header = func.blocks.iter().find(|b| {
-            b.statements.iter().any(|s| s.text.starts_with("while "))
-        }).expect("should have while header");
+        let header = func
+            .blocks
+            .iter()
+            .find(|b| b.statements.iter().any(|s| s.text.starts_with("while ")))
+            .expect("should have while header");
 
         // False edge should go to else block
-        let false_edge = header.successors.iter()
+        let false_edge = header
+            .successors
+            .iter()
             .find(|e| e.label == "False")
             .expect("while should have False edge");
 
         let target_block = &func.blocks[false_edge.target];
-        let has_else_stmt = target_block.statements.iter()
+        let has_else_stmt = target_block
+            .statements
+            .iter()
             .any(|s| s.text.contains("'else'") || s.text.contains("\"else\""));
-        assert!(has_else_stmt,
+        assert!(
+            has_else_stmt,
             "False edge should target else block, but targets block {} with stmts: {:?}",
-            target_block.id, target_block.statements);
+            target_block.id, target_block.statements
+        );
 
         // Header should have exactly True and False edges (no duplicate False)
-        let false_count = header.successors.iter().filter(|e| e.label == "False").count();
-        assert_eq!(false_count, 1, "should have exactly 1 False edge after retain");
+        let false_count = header
+            .successors
+            .iter()
+            .filter(|e| e.label == "False")
+            .count();
+        assert_eq!(
+            false_count, 1,
+            "should have exactly 1 False edge after retain"
+        );
     }
 
     #[test]
@@ -1955,15 +2060,27 @@ mod tests {
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
 
-        let header = func.blocks.iter().find(|b| {
-            b.statements.iter().any(|s| s.text.starts_with("while "))
-        }).unwrap();
+        let header = func
+            .blocks
+            .iter()
+            .find(|b| b.statements.iter().any(|s| s.text.starts_with("while ")))
+            .unwrap();
 
         assert_eq!(
-            header.successors.iter().filter(|e| e.label == "True").count(), 1
+            header
+                .successors
+                .iter()
+                .filter(|e| e.label == "True")
+                .count(),
+            1
         );
         assert_eq!(
-            header.successors.iter().filter(|e| e.label == "False").count(), 1
+            header
+                .successors
+                .iter()
+                .filter(|e| e.label == "False")
+                .count(),
+            1
         );
     }
 
@@ -1989,7 +2106,10 @@ mod tests {
         let source = "def outer():\n    class Inner:\n        def method(self):\n            return 42\n    return Inner()\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         assert!(
-            result.functions.iter().any(|f| f.name == "outer.Inner.method"),
+            result
+                .functions
+                .iter()
+                .any(|f| f.name == "outer.Inner.method"),
             "should find class method nested inside a function; found: {:?}",
             result.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
