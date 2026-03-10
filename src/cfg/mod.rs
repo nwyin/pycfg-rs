@@ -1,104 +1,14 @@
 use ruff_python_ast::{self as ast, Stmt};
 use ruff_python_parser::{Mode, ParseOptions};
-use ruff_text_size::{Ranged, TextSize};
-use serde::Serialize;
-use std::fmt;
+use ruff_text_size::Ranged;
 
-// ---------------------------------------------------------------------------
-// Core data structures
-// ---------------------------------------------------------------------------
+mod model;
+mod source_map;
+mod symbols;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Edge {
-    pub target: usize,
-    pub label: String,
-}
+pub use model::{BasicBlock, Edge, FileCfg, FunctionCfg, Metrics, Statement};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Statement {
-    pub line: usize,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BasicBlock {
-    pub id: usize,
-    pub label: String,
-    pub statements: Vec<Statement>,
-    pub successors: Vec<Edge>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Metrics {
-    pub blocks: usize,
-    pub edges: usize,
-    pub branches: usize,
-    pub cyclomatic_complexity: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct FunctionCfg {
-    pub name: String,
-    pub line: usize,
-    pub blocks: Vec<BasicBlock>,
-    pub metrics: Metrics,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct FileCfg {
-    pub file: String,
-    pub functions: Vec<FunctionCfg>,
-}
-
-impl Metrics {
-    fn compute(blocks: &[BasicBlock]) -> Self {
-        let num_blocks = blocks.len();
-        let num_edges: usize = blocks.iter().map(|b| b.successors.len()).sum();
-        let branches = blocks.iter().filter(|b| b.successors.len() > 1).count();
-        let cyclomatic = if num_blocks == 0 {
-            1
-        } else {
-            // E - N + 2 (McCabe formula). Use signed arithmetic to handle E < N.
-            (num_edges as isize - num_blocks as isize + 2).max(1) as usize
-        };
-        Metrics {
-            blocks: num_blocks,
-            edges: num_edges,
-            branches,
-            cyclomatic_complexity: cyclomatic,
-        }
-    }
-}
-
-impl fmt::Display for FunctionCfg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "def {}:", self.name)?;
-        writeln!(f)?;
-        for block in &self.blocks {
-            if block.label == "entry" || block.label == "exit" {
-                write!(f, "  Block {} ({}):", block.id, block.label)?;
-            } else {
-                write!(f, "  Block {}:", block.id)?;
-            }
-            writeln!(f)?;
-            for stmt in &block.statements {
-                writeln!(f, "    [L{}] {}", stmt.line, stmt.text)?;
-            }
-            for edge in &block.successors {
-                writeln!(f, "    -> Block {} [{}]", edge.target, edge.label)?;
-            }
-            writeln!(f)?;
-        }
-        writeln!(
-            f,
-            "  # blocks={} edges={} branches={} cyclomatic_complexity={}",
-            self.metrics.blocks,
-            self.metrics.edges,
-            self.metrics.branches,
-            self.metrics.cyclomatic_complexity
-        )
-    }
-}
+use symbols::visit_functions;
 
 // ---------------------------------------------------------------------------
 // CFG Builder
@@ -180,12 +90,11 @@ impl<'src> CfgBuilder<'src> {
     }
 
     fn offset_to_line(&self, offset: ruff_text_size::TextSize) -> usize {
-        self.source[..offset.to_usize()].lines().count().max(1)
+        source_map::offset_to_line(self.source, offset)
     }
 
     fn range_text(&self, range: ruff_text_size::TextRange) -> String {
-        let text = &self.source[range.start().to_usize()..range.end().to_usize()];
-        text.lines().next().unwrap_or("").trim().to_string()
+        source_map::range_text(self.source, range)
     }
 
     fn build_stmts(&mut self, stmts: &[Stmt], mut current: usize, exit: usize) -> Option<usize> {
@@ -720,57 +629,6 @@ pub struct CfgOptions {
     pub explicit_exceptions: bool,
 }
 
-struct FunctionVisit<'a> {
-    qualified_name: String,
-    leaf_name: String,
-    line: usize,
-    body: &'a [Stmt],
-}
-
-fn visit_functions<'a, F>(source: &str, stmts: &'a [Stmt], visit: &mut F)
-where
-    F: FnMut(FunctionVisit<'a>),
-{
-    visit_scope(source, stmts, "", visit);
-}
-
-fn visit_scope<'a, F>(source: &str, stmts: &'a [Stmt], prefix: &str, visit: &mut F)
-where
-    F: FnMut(FunctionVisit<'a>),
-{
-    for stmt in stmts {
-        match stmt {
-            Stmt::FunctionDef(func_def) => {
-                let qualified_name = qualify_name(prefix, func_def.name.as_str());
-                visit(FunctionVisit {
-                    qualified_name: qualified_name.clone(),
-                    leaf_name: func_def.name.to_string(),
-                    line: line_from_offset(source, func_def.range().start()),
-                    body: &func_def.body,
-                });
-                visit_scope(source, &func_def.body, &qualified_name, visit);
-            }
-            Stmt::ClassDef(class_def) => {
-                let class_prefix = qualify_name(prefix, class_def.name.as_str());
-                visit_scope(source, &class_def.body, &class_prefix, visit);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn qualify_name(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{prefix}.{name}")
-    }
-}
-
-fn line_from_offset(source: &str, offset: TextSize) -> usize {
-    source[..offset.to_usize()].lines().count().max(1)
-}
-
 pub fn build_cfgs(source: &str, filename: &str, options: &CfgOptions) -> FileCfg {
     let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
     let module = parsed.into_syntax();
@@ -886,7 +744,9 @@ fn build_single_cfg(
 
 #[cfg(test)]
 mod tests {
+    use super::source_map::line_from_offset;
     use super::*;
+    use ruff_text_size::TextSize;
 
     #[test]
     fn test_simple_function() {
@@ -1404,8 +1264,7 @@ mod tests {
 
     #[test]
     fn test_raise_after_try_finally_does_not_reenter_finally() {
-        let source =
-            "def foo():\n    try:\n        work()\n    finally:\n        cleanup()\n    raise ValueError()\n";
+        let source = "def foo():\n    try:\n        work()\n    finally:\n        cleanup()\n    raise ValueError()\n";
         let result = build_cfgs(source, "test.py", &CfgOptions::default());
         let func = &result.functions[0];
         let raise_block = func
