@@ -20,6 +20,18 @@ pub struct CfgOptions {
     pub explicit_exceptions: bool,
 }
 
+pub fn parse_diagnostics(source: &str) -> Vec<String> {
+    let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
+    let mut diagnostics: Vec<String> = parsed.errors().iter().map(ToString::to_string).collect();
+    diagnostics.extend(
+        parsed
+            .unsupported_syntax_errors()
+            .iter()
+            .map(ToString::to_string),
+    );
+    diagnostics
+}
+
 pub fn build_cfgs(source: &str, filename: &str, options: &CfgOptions) -> FileCfg {
     let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
     let module = parsed.into_syntax();
@@ -80,7 +92,7 @@ pub fn build_cfg_for_function(
 
     let mut functions = Vec::new();
     visit_functions(source, &stmts, &mut |function| {
-        if function.qualified_name == function_name || function.leaf_name == function_name {
+        if function.qualified_name == function_name {
             functions.push(build_single_cfg(
                 source,
                 &function.qualified_name,
@@ -195,6 +207,16 @@ mod tests {
         let file_cfg = result.unwrap();
         assert_eq!(file_cfg.functions.len(), 1);
         assert_eq!(file_cfg.functions[0].name, "bar");
+    }
+
+    #[test]
+    fn test_function_targeting_requires_exact_qualified_name() {
+        let source = "class Foo:\n    def bar(self):\n        return 1\n";
+        let result = build_cfg_for_function(source, "test.py", "bar", &CfgOptions::default());
+        assert!(
+            result.is_none(),
+            "leaf-name fallback should not match methods"
+        );
     }
 
     #[test]

@@ -64,7 +64,7 @@ fn collect_python_files(path: &str) -> Vec<String> {
         {
             files.push(entry.path().to_string_lossy().to_string());
         }
-    } else if p.extension().is_some_and(|ext| ext == "py") || p.exists() {
+    } else if p.is_file() && p.extension().is_some_and(|ext| ext == "py") {
         files.push(path.to_string());
     }
     files.sort();
@@ -101,6 +101,16 @@ fn main() -> Result<()> {
                     continue;
                 }
             };
+
+            let diagnostics = cfg::parse_diagnostics(&source);
+            if !diagnostics.is_empty() {
+                log::warn!(
+                    "Skipping {} due to parse errors: {}",
+                    file,
+                    diagnostics.join(" | ")
+                );
+                continue;
+            }
 
             let file_cfg = if let Some(ref func) = func_name {
                 match cfg::build_cfg_for_function(&source, file, func, &options) {
@@ -273,22 +283,16 @@ mod tests {
     #[test]
     fn test_collect_python_files_non_python() {
         let files = collect_python_files("Cargo.toml");
-        // Cargo.toml exists but doesn't end with .py
-        // However, collect_python_files has a fallback: if it exists, include it
-        assert_eq!(files.len(), 1);
+        assert!(files.is_empty(), "non-.py files should be rejected");
     }
 
     #[test]
-    fn test_collect_python_files_nonexistent_py() {
-        // Catches: == to != for .py extension check (line 67)
-        // A nonexistent .py file should still be included (by extension check)
+    fn test_collect_python_files_nonexistent_py_rejected() {
         let files = collect_python_files("nonexistent_file_xyz.py");
-        assert_eq!(
-            files.len(),
-            1,
-            "nonexistent .py file should be included by extension check"
+        assert!(
+            files.is_empty(),
+            "nonexistent .py files should not be accepted"
         );
-        assert_eq!(files[0], "nonexistent_file_xyz.py");
     }
 
     #[test]

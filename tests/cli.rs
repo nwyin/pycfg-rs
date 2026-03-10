@@ -1,6 +1,7 @@
 mod common;
 
 use common::run_pycfg;
+use tempfile::tempdir;
 
 #[test]
 fn test_cli_text_output() {
@@ -40,6 +41,17 @@ fn test_cli_function_targeting() {
 }
 
 #[test]
+fn test_cli_function_targeting_requires_exact_name() {
+    let output = run_pycfg(&["--format", "json", "tests/test_code/classes.py::validate"]);
+    assert!(
+        !output.status.success(),
+        "leaf-name-only function target should not be accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No Python files or functions found to analyze"));
+}
+
+#[test]
 fn test_cli_directory_input() {
     let output = run_pycfg(&["--format", "json", "tests/test_code"]);
     assert!(output.status.success());
@@ -74,12 +86,34 @@ fn test_cli_explicit_exceptions() {
 #[test]
 fn test_cli_nonexistent_file() {
     let output = run_pycfg(&["nonexistent_file_xyz.py"]);
+    assert!(!output.status.success(), "nonexistent file should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stderr.contains("No Python files or functions found to analyze"));
+}
+
+#[test]
+fn test_cli_skips_parse_errors_and_continues() {
+    let dir = tempdir().unwrap();
+    let valid = dir.path().join("valid.py");
+    let invalid = dir.path().join("invalid.py");
+    std::fs::write(&valid, "def ok():\n    return 1\n").unwrap();
+    std::fs::write(&invalid, "def broken(:\n    return 2\n").unwrap();
+
+    let output = run_pycfg(&["--format", "json", dir.path().to_str().unwrap()]);
     assert!(
-        !output.status.success() || stdout.is_empty() || stderr.contains("Failed"),
-        "nonexistent file should produce error or warning"
+        output.status.success(),
+        "valid files should still be analyzed"
     );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let files = parsed["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "only the valid file should be analyzed");
+    assert!(files[0]["file"].as_str().unwrap().ends_with("valid.py"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Skipping"));
+    assert!(stderr.contains("parse errors"));
 }
 
 #[test]

@@ -5,7 +5,6 @@ use super::source_map::line_from_offset;
 
 pub(crate) struct FunctionVisit<'a> {
     pub(crate) qualified_name: String,
-    pub(crate) leaf_name: String,
     pub(crate) line: usize,
     pub(crate) body: &'a [Stmt],
 }
@@ -27,7 +26,6 @@ where
                 let qualified_name = qualify_name(prefix, func_def.name.as_str());
                 visit(FunctionVisit {
                     qualified_name: qualified_name.clone(),
-                    leaf_name: func_def.name.to_string(),
                     line: line_from_offset(source, func_def.range().start()),
                     body: &func_def.body,
                 });
