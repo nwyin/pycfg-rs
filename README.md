@@ -149,9 +149,12 @@ cargo test                           # Run all tests
 cargo clippy -- -D warnings          # Lint with warnings denied
 ./scripts/bootstrap-corpora.sh       # Clone test corpora (requests, flask, rich)
 cargo test -- --nocapture            # See corpus test output
+cargo mutants --file src/cfg/mod.rs --file src/main.rs
 ```
 
-Mutation testing is part of the quality bar for this project, but the current suite still has surviving mutants around CLI/reporting boundaries and some `try`/`finally` edge conditions. Tightening those targeted tests is ongoing follow-up work.
+Exact CLI output contracts are pinned with golden files in `tests/golden/`. When a user-facing text, JSON, or DOT change is intentional, update the corresponding golden and review the diff as part of the change.
+
+Mutation testing is part of the maintenance workflow for touched surfaces. Full-project runs are useful periodically, but focused runs against the files you changed are usually enough to guard against regressions during routine maintenance.
 
 ## Benchmarks
 
