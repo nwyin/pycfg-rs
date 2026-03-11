@@ -1,5 +1,7 @@
 use ruff_python_ast::{self as ast, Stmt};
 use ruff_python_parser::{Mode, ParseOptions};
+use std::error::Error;
+use std::fmt;
 
 mod builder;
 mod model;
@@ -20,32 +22,38 @@ pub struct CfgOptions {
     pub explicit_exceptions: bool,
 }
 
-pub fn parse_diagnostics(source: &str) -> Vec<String> {
-    let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
-    let mut diagnostics: Vec<String> = parsed.errors().iter().map(ToString::to_string).collect();
-    diagnostics.extend(
-        parsed
-            .unsupported_syntax_errors()
-            .iter()
-            .map(ToString::to_string),
-    );
-    diagnostics
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    diagnostics: Vec<String>,
 }
 
-pub fn build_cfgs(source: &str, filename: &str, options: &CfgOptions) -> FileCfg {
-    let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
-    let module = parsed.into_syntax();
+impl ParseError {
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
+    }
+}
 
-    let stmts = match module {
-        ast::Mod::Module(m) => m.body,
-        ast::Mod::Expression(e) => {
-            vec![Stmt::Expr(ast::StmtExpr {
-                node_index: Default::default(),
-                value: e.body,
-                range: e.range,
-            })]
-        }
-    };
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.diagnostics.join(" | "))
+    }
+}
+
+impl Error for ParseError {}
+
+pub fn parse_diagnostics(source: &str) -> Vec<String> {
+    match parse_module_stmts(source) {
+        Ok(_) => Vec::new(),
+        Err(err) => err.diagnostics,
+    }
+}
+
+pub fn try_build_cfgs(
+    source: &str,
+    filename: &str,
+    options: &CfgOptions,
+) -> Result<FileCfg, ParseError> {
+    let stmts = parse_module_stmts(source)?;
 
     let mut functions = Vec::new();
     visit_functions(source, &stmts, &mut |function| {
@@ -70,25 +78,24 @@ pub fn build_cfgs(source: &str, filename: &str, options: &CfgOptions) -> FileCfg
         functions.insert(0, top_cfg);
     }
 
-    FileCfg {
+    Ok(FileCfg {
         file: filename.to_string(),
         functions,
-    }
+    })
 }
 
-pub fn build_cfg_for_function(
+pub fn build_cfgs(source: &str, filename: &str, options: &CfgOptions) -> FileCfg {
+    try_build_cfgs(source, filename, options)
+        .unwrap_or_else(|err| panic!("failed to build CFG for {filename}: {err}"))
+}
+
+pub fn try_build_cfg_for_function(
     source: &str,
     filename: &str,
     function_name: &str,
     options: &CfgOptions,
-) -> Option<FileCfg> {
-    let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
-    let module = parsed.into_syntax();
-
-    let stmts = match module {
-        ast::Mod::Module(m) => m.body,
-        ast::Mod::Expression(_) => return None,
-    };
+) -> Result<Option<FileCfg>, ParseError> {
+    let stmts = parse_module_stmts(source)?;
 
     let mut functions = Vec::new();
     visit_functions(source, &stmts, &mut |function| {
@@ -104,13 +111,49 @@ pub fn build_cfg_for_function(
     });
 
     if functions.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(FileCfg {
+        Ok(Some(FileCfg {
             file: filename.to_string(),
             functions,
-        })
+        }))
     }
+}
+
+pub fn build_cfg_for_function(
+    source: &str,
+    filename: &str,
+    function_name: &str,
+    options: &CfgOptions,
+) -> Option<FileCfg> {
+    try_build_cfg_for_function(source, filename, function_name, options)
+        .unwrap_or_else(|err| panic!("failed to build CFG for {filename}::{function_name}: {err}"))
+}
+
+fn parse_module_stmts(source: &str) -> Result<Vec<Stmt>, ParseError> {
+    let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
+    let mut diagnostics: Vec<String> = parsed.errors().iter().map(ToString::to_string).collect();
+    diagnostics.extend(
+        parsed
+            .unsupported_syntax_errors()
+            .iter()
+            .map(ToString::to_string),
+    );
+    if !diagnostics.is_empty() {
+        return Err(ParseError { diagnostics });
+    }
+
+    let module = parsed.into_syntax();
+    Ok(match module {
+        ast::Mod::Module(m) => m.body,
+        ast::Mod::Expression(e) => {
+            vec![Stmt::Expr(ast::StmtExpr {
+                node_index: Default::default(),
+                value: e.body,
+                range: e.range,
+            })]
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +260,44 @@ mod tests {
             result.is_none(),
             "leaf-name fallback should not match methods"
         );
+    }
+
+    #[test]
+    fn test_try_build_cfgs_returns_parse_error() {
+        let source = "def foo(:\n    pass\n";
+        let expected = parse_diagnostics(source);
+        let err = try_build_cfgs(source, "broken.py", &CfgOptions::default()).unwrap_err();
+        assert_eq!(err.diagnostics(), expected.as_slice());
+        assert!(err.to_string().contains("Expected"));
+    }
+
+    #[test]
+    fn test_try_build_cfg_for_function_returns_parse_error() {
+        let err = try_build_cfg_for_function(
+            "def foo(:\n    pass\n",
+            "broken.py",
+            "foo",
+            &CfgOptions::default(),
+        )
+        .unwrap_err();
+        assert!(!err.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn test_parse_diagnostics_reports_invalid_source() {
+        let diagnostics = parse_diagnostics("def foo(:\n    pass\n");
+        assert!(!diagnostics.is_empty());
+        assert!(diagnostics.iter().all(|diagnostic| !diagnostic.is_empty()));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("Expected"))
+        );
+    }
+
+    #[test]
+    fn test_parse_diagnostics_empty_for_valid_source() {
+        assert!(parse_diagnostics("def foo():\n    return 1\n").is_empty());
     }
 
     #[test]

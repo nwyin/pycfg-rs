@@ -102,26 +102,26 @@ fn main() -> Result<()> {
                 }
             };
 
-            let diagnostics = cfg::parse_diagnostics(&source);
-            if !diagnostics.is_empty() {
-                log::warn!(
-                    "Skipping {} due to parse errors: {}",
-                    file,
-                    diagnostics.join(" | ")
-                );
-                continue;
-            }
-
             let file_cfg = if let Some(ref func) = func_name {
-                match cfg::build_cfg_for_function(&source, file, func, &options) {
-                    Some(fc) => fc,
-                    None => {
+                match cfg::try_build_cfg_for_function(&source, file, func, &options) {
+                    Ok(Some(fc)) => fc,
+                    Ok(None) => {
                         log::warn!("Function '{}' not found in {}", func, file);
+                        continue;
+                    }
+                    Err(err) => {
+                        log::warn!("Skipping {} due to parse errors: {}", file, err);
                         continue;
                     }
                 }
             } else {
-                cfg::build_cfgs(&source, file, &options)
+                match cfg::try_build_cfgs(&source, file, &options) {
+                    Ok(fc) => fc,
+                    Err(err) => {
+                        log::warn!("Skipping {} due to parse errors: {}", file, err);
+                        continue;
+                    }
+                }
             };
 
             all_cfgs.push(file_cfg);
