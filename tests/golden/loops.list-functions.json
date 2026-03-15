@@ -9,11 +9,11 @@
         },
         {
           "name": "while_loop",
-          "line": 9
+          "line": 10
         },
         {
           "name": "break_loop",
-          "line": 16
+          "line": 17
         }
       ]
     }

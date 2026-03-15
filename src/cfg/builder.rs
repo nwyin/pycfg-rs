@@ -4,9 +4,11 @@ use ruff_text_size::Ranged;
 use super::{
     BasicBlock, BlockKind, CfgOptions, Edge, EdgeKind, FunctionCfg, Metrics, Statement, source_map,
 };
+use super::source_map::LineIndex;
 
 pub(crate) struct CfgBuilder<'src> {
     source: &'src str,
+    line_index: &'src LineIndex,
     blocks: Vec<BasicBlock>,
     loop_stack: Vec<(usize, usize)>,
     except_stack: Vec<Vec<usize>>,
@@ -27,9 +29,10 @@ pub(crate) struct FinallyFrame {
 }
 
 impl<'src> CfgBuilder<'src> {
-    fn new(source: &'src str, explicit_exceptions: bool) -> Self {
+    fn new(source: &'src str, line_index: &'src LineIndex, explicit_exceptions: bool) -> Self {
         CfgBuilder {
             source,
+            line_index,
             blocks: Vec::new(),
             loop_stack: Vec::new(),
             except_stack: Vec::new(),
@@ -82,7 +85,7 @@ impl<'src> CfgBuilder<'src> {
     }
 
     fn offset_to_line(&self, offset: ruff_text_size::TextSize) -> usize {
-        source_map::offset_to_line(self.source, offset)
+        self.line_index.line_from_offset(offset)
     }
 
     fn range_text(&self, range: ruff_text_size::TextRange) -> String {
@@ -617,12 +620,13 @@ impl<'src> CfgBuilder<'src> {
 
 #[cfg(test)]
 mod tests {
-    use super::CfgBuilder;
+    use super::{CfgBuilder, LineIndex};
     use crate::cfg::{BlockKind, EdgeKind};
 
     #[test]
     fn remove_edge_requires_matching_target_and_label() {
-        let mut builder = CfgBuilder::new("", false);
+        let line_index = LineIndex::build("");
+        let mut builder = CfgBuilder::new("", &line_index, false);
         let from = builder.new_block(BlockKind::Body);
         let shared_target = builder.new_block(BlockKind::Body);
         let other_target = builder.new_block(BlockKind::Body);
@@ -656,12 +660,13 @@ mod tests {
 
 pub(crate) fn build_single_cfg(
     source: &str,
+    line_index: &LineIndex,
     name: &str,
     line: usize,
     body: &[Stmt],
     options: &CfgOptions,
 ) -> FunctionCfg {
-    let mut builder = CfgBuilder::new(source, options.explicit_exceptions);
+    let mut builder = CfgBuilder::new(source, line_index, options.explicit_exceptions);
 
     let entry = builder.new_block(BlockKind::Entry);
     let exit = builder.new_block(BlockKind::Exit);

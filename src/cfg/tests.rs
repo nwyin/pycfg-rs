@@ -1,5 +1,5 @@
 use super::builder::{CfgBuilder, FinallyFrame, PendingEdge};
-use super::source_map::line_from_offset;
+use super::source_map::{LineIndex, line_from_offset};
 use super::*;
 use ruff_text_size::TextSize;
 
@@ -1220,6 +1220,19 @@ fn test_line_from_offset_precise() {
     assert_eq!(line_from_offset(source, TextSize::from(0)), 1);
     assert_eq!(line_from_offset(source, TextSize::from(7)), 2);
     assert_eq!(line_from_offset(source, TextSize::from(12)), 3);
+}
+
+#[test]
+fn test_line_index_matches_linear_scan() {
+    let source = "alpha\nbeta\ngamma\n";
+    let index = LineIndex::build(source);
+    assert_eq!(index.line_from_offset(TextSize::from(0)), 1); // start of "alpha"
+    assert_eq!(index.line_from_offset(TextSize::from(3)), 1); // middle of "alpha"
+    assert_eq!(index.line_from_offset(TextSize::from(5)), 1); // the '\n' itself
+    assert_eq!(index.line_from_offset(TextSize::from(6)), 2); // start of "beta"
+    assert_eq!(index.line_from_offset(TextSize::from(7)), 2); // 'e' in "beta"
+    assert_eq!(index.line_from_offset(TextSize::from(11)), 3); // start of "gamma"
+    assert_eq!(index.line_from_offset(TextSize::from(12)), 3); // 'a' in "gamma"
 }
 
 #[test]

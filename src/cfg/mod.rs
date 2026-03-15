@@ -12,6 +12,7 @@ mod symbols;
 pub use model::{BasicBlock, BlockKind, Edge, EdgeKind, FileCfg, FunctionCfg, Metrics, Statement};
 
 use builder::build_single_cfg;
+use source_map::LineIndex;
 use symbols::visit_functions;
 
 // ---------------------------------------------------------------------------
@@ -57,8 +58,9 @@ pub fn parse_diagnostics(source: &str) -> Vec<String> {
 
 pub fn try_list_functions(source: &str) -> Result<Vec<FunctionInfo>, ParseError> {
     let stmts = parse_module_stmts(source)?;
+    let line_index = LineIndex::build(source);
     let mut functions = Vec::new();
-    visit_functions(source, &stmts, &mut |function| {
+    visit_functions(&line_index, &stmts, &mut |function| {
         functions.push(FunctionInfo {
             name: function.qualified_name,
             line: function.line,
@@ -77,11 +79,13 @@ pub fn try_build_cfgs(
     options: &CfgOptions,
 ) -> Result<FileCfg, ParseError> {
     let stmts = parse_module_stmts(source)?;
+    let line_index = LineIndex::build(source);
 
     let mut functions = Vec::new();
-    visit_functions(source, &stmts, &mut |function| {
+    visit_functions(&line_index, &stmts, &mut |function| {
         functions.push(build_single_cfg(
             source,
+            &line_index,
             &function.qualified_name,
             function.line,
             function.body,
@@ -97,7 +101,7 @@ pub fn try_build_cfgs(
     });
 
     if has_top_level_code || functions.is_empty() {
-        let top_cfg = build_single_cfg(source, "<module>", 1, &stmts, options);
+        let top_cfg = build_single_cfg(source, &line_index, "<module>", 1, &stmts, options);
         functions.insert(0, top_cfg);
     }
 
@@ -119,12 +123,14 @@ pub fn try_build_cfg_for_function(
     options: &CfgOptions,
 ) -> Result<Option<FileCfg>, ParseError> {
     let stmts = parse_module_stmts(source)?;
+    let line_index = LineIndex::build(source);
 
     let mut functions = Vec::new();
-    visit_functions(source, &stmts, &mut |function| {
+    visit_functions(&line_index, &stmts, &mut |function| {
         if function.qualified_name == function_name {
             functions.push(build_single_cfg(
                 source,
+                &line_index,
                 &function.qualified_name,
                 function.line,
                 function.body,
