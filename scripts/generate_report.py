@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Generate a static HTML report of pycfg-rs analysis across Python corpora.
+"""Generate a static HTML product page + corpus report for pycfg-rs.
 
-Runs pycfg on each corpus, collects metrics, and emits a self-contained index.html
-with per-project accordion sections and CFG visualizations.
+Three sections:
+  1. Hero: pitch, install, example, comparison table, links
+  2. Corpus report: per-project accordion stats with CFG visualizations
+  3. Essay: why intra-procedural CFGs matter for LLM workflows
 
 Usage:
     cargo build --release
@@ -17,6 +19,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -38,6 +41,116 @@ CORPORA = [
 CORPORA_DIR = Path("benchmark/corpora")
 
 TOP_N = 5  # number of top complex functions to show per project
+
+# ---------------------------------------------------------------------------
+# Static content
+# ---------------------------------------------------------------------------
+
+COMPARISON_ROWS = [
+    ("Speed (rich, 100 files)", "65 ms", "84 ms", "7 ms*"),
+    ("Per-function speed", "0.066 ms", "0.35 ms", "0.19 ms"),
+    ("File coverage", "100%", "74%", "13%"),
+    ("Output formats", "text / JSON / DOT", "DOT only", "Python object"),
+    ("Python 3.10+ (match/case)", "yes", "no", "no"),
+    ("Runtime required", "no", "no", "yes (import)"),
+    ("Language", "Rust", "Python", "Python"),
+    ("Maintained", "active", "unmaintained", "archived"),
+]
+
+EXAMPLE_PYTHON = """\
+def process(request):
+    try:
+        user = authenticate(request)
+        if user.is_admin:
+            return admin_dashboard(user)
+        return user_dashboard(user)
+    except AuthError:
+        return redirect("/login")
+    finally:
+        log_access(request)"""
+
+EXAMPLE_OUTPUT = """\
+$ pycfg src/app/service.py::process
+
+Function: process (line 1)
+  Block 0 (entry):
+    [L2] try:
+    -> 1 (try-body)
+    -> 3 (exception: AuthError)
+  Block 1 (try-body):
+    [L3] user = authenticate(request)
+    [L4] if user.is_admin:
+    -> 2 (True)
+    -> 5 (False)
+  Block 2 (if-true):
+    [L5] return admin_dashboard(user)
+    -> 4 (finally)
+  Block 3 (except: AuthError):
+    [L7] return redirect("/login")
+    -> 4 (finally)
+  Block 4 (finally):
+    [L9] log_access(request)
+    -> 6 (exit)
+  Block 5 (if-false):
+    [L6] return user_dashboard(user)
+    -> 4 (finally)
+  Block 6 (exit):
+
+  Metrics: 7 blocks, 8 edges, 2 branches, CC=4"""
+
+WHY_ESSAY = """\
+<p>
+LLMs are surprisingly bad at control flow reasoning. Given a function with
+nested branches, exception handlers, and early returns, models routinely
+mis-predict which paths are reachable, confuse exception routing with normal
+flow, and miss edge cases in <code>try</code>/<code>finally</code> blocks.
+This is not a model-size problem &mdash; it is a representation problem.
+Source code buries control flow in indentation and keywords. CFGs make it
+explicit.
+</p>
+
+<p>
+A control flow graph reduces a function to its structural skeleton: basic
+blocks connected by labeled edges. Instead of asking "what happens if
+<code>authenticate</code> raises?", an agent reads the graph and sees the
+edge directly: <em>Block 0 &rarr; Block 3 (exception: AuthError)</em>.
+Branches, loops, <code>break</code>/<code>continue</code>, and exception
+routing all become first-class, queryable structure.
+</p>
+
+<p>
+<strong>Cyclomatic complexity</strong> is the useful byproduct. CC = E &minus; N + 2
+counts the number of linearly independent paths through a function.
+A function with CC &gt; 15 has too many paths for a model to reason about
+in one pass. An agent that checks CC first can decide to decompose the
+function, or to focus its attention on the high-complexity branches,
+before attempting a change.
+</p>
+
+<p>
+The key design choice in pycfg-rs is <strong>machine-consumable output</strong>.
+The JSON format preserves block IDs, edge labels, statement text, and
+line numbers &mdash; everything an agent needs to cross-reference back to
+source. The text format is designed to be readable in a prompt without
+extra parsing. DOT output feeds into Graphviz for visual inspection.
+Three formats, one structural truth.
+</p>
+
+<p>
+Speed matters because CFG queries belong inside the editing loop, not
+before it. At 65 ms across 100 files and 15,000+ functions per second,
+pycfg-rs is fast enough to invoke on every prompt. You call it live,
+so the results are never stale.
+</p>
+
+<p>
+Static analysis is not omniscient. <code>exec</code>, dynamic dispatch,
+and metaprogramming will always create blind spots. But for the
+overwhelmingly common case &mdash; regular Python functions with
+branches, loops, and exception handling &mdash; the CFG is exact,
+and it tells the model which code to reason about carefully.
+</p>"""
+
 
 # ---------------------------------------------------------------------------
 # Data collection
@@ -171,27 +284,8 @@ def fetch_dot_for_top_functions(result: CorpusResult, binary: str, top_n: int = 
 
 
 # ---------------------------------------------------------------------------
-# Test / version info
+# Version / git info
 # ---------------------------------------------------------------------------
-
-
-def get_test_count() -> int | None:
-    try:
-        proc = subprocess.run(
-            ["cargo", "test", "--", "--list"],
-            capture_output=True,
-            timeout=120,
-        )
-        if proc.returncode != 0:
-            return None
-        output = proc.stdout.decode()
-        count = 0
-        for line in output.splitlines():
-            if line.strip().endswith(": test"):
-                count += 1
-        return count
-    except Exception:
-        return None
 
 
 def get_version() -> str:
@@ -219,7 +313,7 @@ def get_git_sha() -> str:
 
 
 # ---------------------------------------------------------------------------
-# HTML generation
+# HTML helpers
 # ---------------------------------------------------------------------------
 
 
@@ -231,16 +325,96 @@ def cc_class(cc: int) -> str:
     return "cc-low"
 
 
-def generate_html(results: list[CorpusResult], test_count: int | None, version: str, sha: str) -> str:
-    now = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+# ---------------------------------------------------------------------------
+# Section 1: Hero
+# ---------------------------------------------------------------------------
 
-    total_files = sum(r.files for r in results if r.success)
-    total_funcs = sum(r.functions for r in results if r.success)
-    total_time = sum(r.parse_time_ms for r in results if r.success)
-    success_count = sum(1 for r in results if r.success)
-    test_str = f"{test_count}" if test_count else "—"
 
-    # Build per-project accordion sections
+def _hero_html() -> str:
+    comparison_rows = ""
+    for label, pycfg, staticfg, pgraphs in COMPARISON_ROWS:
+        comparison_rows += f"""<tr>
+  <td>{escape(label)}</td>
+  <td class="highlight">{escape(pycfg)}</td>
+  <td>{escape(staticfg)}</td>
+  <td>{escape(pgraphs)}</td>
+</tr>"""
+
+    return f"""
+<header class="hero">
+  <h1>pycfg-rs</h1>
+  <p class="tagline">Fast intra-procedural control flow graph generation for Python.</p>
+  <p class="tagline-sub">No runtime required. Text, JSON, and DOT output for humans, machines, and agents.</p>
+
+  <nav class="page-nav">
+    <a href="#get-started">Get started</a>
+    <a href="#comparison">Comparison</a>
+    <a href="#corpus">Corpus results</a>
+    <a href="#why">Why CFGs?</a>
+  </nav>
+
+  <div class="section" id="get-started">
+    <h2>Get started</h2>
+    <pre class="code-block"><span class="prompt">$</span> git clone https://github.com/nwyin/pycfg-rs && cd pycfg-rs
+<span class="prompt">$</span> cargo build --release
+<span class="prompt">$</span> target/release/pycfg src/app/service.py::UserService.get_profile</pre>
+  </div>
+
+  <div class="example-block">
+    <div class="example-side">
+      <p class="example-label">Python source</p>
+      <pre class="code-block">{escape(EXAMPLE_PYTHON)}</pre>
+    </div>
+    <div class="example-side">
+      <p class="example-label">What pycfg-rs produces</p>
+      <pre class="code-block">{escape(EXAMPLE_OUTPUT)}</pre>
+    </div>
+  </div>
+
+  <div class="section" id="comparison">
+    <h2>How it compares</h2>
+    <p class="section-desc">
+      Speed measured on the <a href="https://github.com/Textualize/rich">rich</a> corpus (100 files, 984 functions).
+      * python-graphs only analyzed 13% of files due to import requirements.
+      <a href="https://github.com/nwyin/pycfg-rs/blob/main/docs/roadmap.md">Roadmap and limitations.</a>
+    </p>
+    <table class="comparison-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th class="highlight">pycfg-rs</th>
+          <th><a href="https://github.com/coetaur0/staticfg">staticfg</a></th>
+          <th><a href="https://github.com/google-research/python-graphs">python-graphs</a></th>
+        </tr>
+      </thead>
+      <tbody>
+        {comparison_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="sibling-link">
+    For inter-procedural call graphs, see
+    <a href="https://github.com/nwyin/pycg-rs">pycg-rs</a> &mdash;
+    together they cover call graphs and control flow for Python static analysis.
+  </p>
+</header>"""
+
+
+# ---------------------------------------------------------------------------
+# Section 2: Corpus report
+# ---------------------------------------------------------------------------
+
+
+def _corpus_html(results: list[CorpusResult]) -> str:
+    ok = [r for r in results if r.success]
+    total_funcs = sum(r.functions for r in ok)
+    total_time = sum(r.parse_time_ms for r in ok)
+    throughput = total_funcs / (total_time / 1000) if total_time > 0 else 0
+    total_files = sum(r.files for r in ok)
+    success_count = len(ok)
+
+    # Per-project accordion sections
     project_sections = ""
     for r in sorted(results, key=lambda r: r.functions, reverse=True):
         if not r.success:
@@ -249,13 +423,13 @@ def generate_html(results: list[CorpusResult], test_count: int | None, version: 
     <summary class="project-header">
         <span class="project-name">{r.name}</span>
         <span class="project-badge badge-fail">failed</span>
-        <span class="project-error">{html.escape(r.error)}</span>
+        <span class="project-error">{escape(r.error)}</span>
     </summary>
 </details>"""
             continue
 
         avg_cc = r.total_cc / r.functions if r.functions > 0 else 0
-        throughput = r.functions / (r.parse_time_ms / 1000) if r.parse_time_ms > 0 else 0
+        proj_throughput = r.functions / (r.parse_time_ms / 1000) if r.parse_time_ms > 0 else 0
 
         # CC distribution
         low = sum(1 for f in r.all_functions if f.cyclomatic_complexity < 5)
@@ -283,18 +457,18 @@ def generate_html(results: list[CorpusResult], test_count: int | None, version: 
             func_cards += f"""
             <div class="func-card">
                 <div class="func-header">
-                    <span class="func-name">{html.escape(f.name)}</span>
+                    <span class="func-name">{escape(f.name)}</span>
                     <span class="func-cc {cc_class(f.cyclomatic_complexity)}">CC {f.cyclomatic_complexity}</span>
                 </div>
                 <div class="func-meta">
-                    <span class="func-file">{html.escape(short_file)}:{f.line}</span>
+                    <span class="func-file">{escape(short_file)}:{f.line}</span>
                     <span class="func-stats">{f.blocks} blocks, {f.edges} edges</span>
                 </div>
                 {cfg_section}
             </div>"""
 
         project_sections += f"""
-<details class="project-accordion" open>
+<details class="project-accordion">
     <summary class="project-header">
         <span class="project-name"><a href="{r.url}" target="_blank">{r.name}</a></span>
         <span class="project-stat">{r.files} files</span>
@@ -322,7 +496,7 @@ def generate_html(results: list[CorpusResult], test_count: int | None, version: 
                 <span class="mini-label">max CC</span>
             </div>
             <div class="mini-stat">
-                <span class="mini-value">{throughput:,.0f}</span>
+                <span class="mini-value">{proj_throughput:,.0f}</span>
                 <span class="mini-label">fn/s</span>
             </div>
         </div>
@@ -341,12 +515,54 @@ def generate_html(results: list[CorpusResult], test_count: int | None, version: 
     </div>
 </details>"""
 
-    page_html = f"""<!DOCTYPE html>
+    return f"""
+<section class="section" id="corpus">
+  <h2>Corpus results</h2>
+  <p class="section-desc">
+    Analysis of {len(results)} popular open-source Python projects, run on every push.
+    Expand a project to see complexity distribution and CFG visualizations.
+  </p>
+  <div class="report-summary">
+    <span class="stat">Throughput: <strong>{throughput:,.0f} functions/sec</strong> across {len(ok)} projects</span>
+    <span class="stat">Total: <strong>{total_funcs:,}</strong> functions in <strong>{total_files}</strong> files</span>
+    <span class="stat">Time: <strong>{total_time:.0f} ms</strong></span>
+    <span class="stat">Coverage: <strong>{success_count}/{len(results)}</strong> projects passing</span>
+  </div>
+  {project_sections}
+</section>"""
+
+
+# ---------------------------------------------------------------------------
+# Section 3: Essay
+# ---------------------------------------------------------------------------
+
+
+def _essay_html() -> str:
+    return f"""
+<section class="section why-essay" id="why">
+  <h2>Why machine-readable CFGs matter for LLM workflows</h2>
+  {WHY_ESSAY}
+</section>"""
+
+
+# ---------------------------------------------------------------------------
+# Full page assembly
+# ---------------------------------------------------------------------------
+
+
+def generate_html(results: list[CorpusResult], version: str, sha: str) -> str:
+    now = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+
+    hero = _hero_html()
+    corpus = _corpus_html(results)
+    essay = _essay_html()
+
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pycfg-rs report</title>
+<title>pycfg-rs &mdash; Fast Python CFG generator</title>
 <style>
 :root {{
     --bg: #0d1117;
@@ -354,55 +570,133 @@ def generate_html(results: list[CorpusResult], test_count: int | None, version: 
     --surface2: #1c2129;
     --border: #30363d;
     --text: #e6edf3;
-    --text-dim: #8b949e;
+    --text-muted: #8b949e;
     --accent: #58a6ff;
     --green: #3fb950;
     --orange: #d29922;
     --red: #f85149;
-    --mono: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }}
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-family: var(--font);
     background: var(--bg);
     color: var(--text);
-    line-height: 1.5;
+    line-height: 1.6;
     padding: 2rem;
-    max-width: 1200px;
+    max-width: 1100px;
     margin: 0 auto;
 }}
-h1 {{ font-size: 1.75rem; margin-bottom: 0.25rem; }}
-h2 {{ font-size: 1.25rem; margin: 2rem 0 0.75rem; color: var(--accent); }}
-.subtitle {{ color: var(--text-dim); margin-bottom: 0.5rem; }}
-.intro {{ color: var(--text-dim); font-size: 0.9rem; margin-bottom: 1.5rem; max-width: 700px; line-height: 1.6; }}
-.meta {{ color: var(--text-dim); font-size: 0.85rem; margin-bottom: 2rem; }}
-.meta span {{ margin-right: 1.5rem; }}
 a {{ color: var(--accent); text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 
-/* Stats cards */
-.stats {{
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 1rem;
-    margin-bottom: 2rem;
-}}
-.stat-card {{
+/* Hero */
+.hero {{ margin-bottom: 3rem; }}
+h1 {{ font-size: 2rem; margin-bottom: 0.25rem; }}
+.tagline {{ font-size: 1.125rem; color: var(--text); margin-bottom: 0.125rem; }}
+.tagline-sub {{ font-size: 0.9375rem; color: var(--text-muted); margin-bottom: 1.5rem; }}
+
+/* Nav */
+.page-nav {{ margin-bottom: 2rem; display: flex; gap: 1.5rem; font-size: 0.875rem; }}
+.page-nav a {{ color: var(--text-muted); }}
+.page-nav a:hover {{ color: var(--accent); }}
+
+/* Code blocks */
+.code-block {{
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-}}
-.stat-card .value {{
-    font-size: 1.75rem;
-    font-weight: 700;
+    border-radius: 6px;
+    padding: 1rem;
     font-family: var(--mono);
-    color: var(--green);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre;
 }}
-.stat-card .label {{
-    color: var(--text-dim);
-    font-size: 0.85rem;
-    margin-top: 0.25rem;
+.code-block .prompt {{ color: var(--text-muted); }}
+
+/* Example side-by-side */
+.example-block {{
+    display: flex;
+    gap: 1rem;
+    margin: 1.5rem 0 2rem;
+}}
+.example-side {{ flex: 1; min-width: 0; }}
+.example-label {{
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.5rem;
+}}
+@media (max-width: 768px) {{
+    .example-block {{ flex-direction: column; }}
+}}
+
+/* Sections */
+.section {{ margin-top: 2.5rem; }}
+.section h2 {{
+    font-size: 1.125rem;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+}}
+.section-desc {{ color: var(--text-muted); font-size: 0.8125rem; margin-bottom: 1rem; line-height: 1.6; }}
+.section-desc a {{ color: var(--accent); }}
+
+/* Report summary stats */
+.report-summary {{
+    display: flex;
+    gap: 2rem;
+    margin-bottom: 1.5rem;
+    font-size: 0.875rem;
+    flex-wrap: wrap;
+}}
+.report-summary .stat {{ color: var(--text-muted); }}
+.report-summary .stat strong {{ color: var(--text); font-family: var(--mono); }}
+
+/* Tables */
+table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
+}}
+th, td {{
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}}
+th {{
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+}}
+td {{ font-family: var(--mono); font-size: 0.8125rem; }}
+tr:hover {{ background: rgba(88,166,255,0.04); }}
+
+/* Comparison table */
+.comparison-table th.highlight,
+.comparison-table td.highlight {{
+    color: var(--green);
+    font-weight: 600;
+}}
+.comparison-table th a {{ color: var(--text-muted); }}
+.comparison-table th a:hover {{ color: var(--accent); }}
+
+/* Sibling link */
+.sibling-link {{
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-top: 2rem;
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
 }}
 
 /* Project accordions */
@@ -426,14 +720,14 @@ a:hover {{ text-decoration: underline; }}
 .project-header::before {{
     content: "\\25B6";
     font-size: 0.7rem;
-    color: var(--text-dim);
+    color: var(--text-muted);
     transition: transform 0.15s;
 }}
 details[open] > .project-header::before {{ transform: rotate(90deg); }}
 .project-name {{ font-weight: 600; font-size: 1rem; }}
 .project-name a {{ color: var(--text); }}
 .project-name a:hover {{ color: var(--accent); }}
-.project-stat {{ color: var(--text-dim); font-size: 0.85rem; font-family: var(--mono); }}
+.project-stat {{ color: var(--text-muted); font-size: 0.85rem; font-family: var(--mono); }}
 .project-badge {{
     font-size: 0.75rem;
     padding: 0.15rem 0.5rem;
@@ -463,10 +757,7 @@ details[open] > .project-header::before {{ transform: rotate(90deg); }}
     font-size: 1.1rem;
     color: var(--accent);
 }}
-.mini-label {{
-    font-size: 0.75rem;
-    color: var(--text-dim);
-}}
+.mini-label {{ font-size: 0.75rem; color: var(--text-muted); }}
 .cc-distribution {{
     font-size: 0.8rem;
     padding: 0.5rem 0;
@@ -475,11 +766,11 @@ details[open] > .project-header::before {{ transform: rotate(90deg); }}
     flex-wrap: wrap;
     align-items: center;
 }}
-.cc-dist-label {{ color: var(--text-dim); }}
+.cc-dist-label {{ color: var(--text-muted); }}
 
 .top-funcs-title {{
     font-size: 0.9rem;
-    color: var(--text-dim);
+    color: var(--text-muted);
     margin: 0.75rem 0 0.5rem;
     font-weight: 600;
 }}
@@ -496,22 +787,13 @@ details[open] > .project-header::before {{ transform: rotate(90deg); }}
     justify-content: space-between;
     gap: 0.5rem;
 }}
-.func-name {{
-    font-family: var(--mono);
-    font-size: 0.9rem;
-    font-weight: 600;
-}}
-.func-cc {{
-    font-family: var(--mono);
-    font-size: 0.85rem;
-    font-weight: 700;
-    white-space: nowrap;
-}}
+.func-name {{ font-family: var(--mono); font-size: 0.9rem; font-weight: 600; }}
+.func-cc {{ font-family: var(--mono); font-size: 0.85rem; font-weight: 700; white-space: nowrap; }}
 .func-meta {{
     display: flex;
     gap: 1rem;
     font-size: 0.8rem;
-    color: var(--text-dim);
+    color: var(--text-muted);
     margin-top: 0.25rem;
 }}
 .func-file {{ font-family: var(--mono); }}
@@ -523,9 +805,7 @@ details[open] > .project-header::before {{ transform: rotate(90deg); }}
 .cc-low {{ color: var(--green); }}
 
 /* CFG visualization */
-.cfg-toggle {{
-    margin-top: 0.5rem;
-}}
+.cfg-toggle {{ margin-top: 0.5rem; }}
 .cfg-toggle > summary {{
     cursor: pointer;
     font-size: 0.8rem;
@@ -544,59 +824,56 @@ details[open] > .project-header::before {{ transform: rotate(90deg); }}
     max-height: 600px;
     overflow-y: auto;
 }}
-.cfg-container svg {{
-    max-width: 100%;
-    height: auto;
+.cfg-container svg {{ max-width: 100%; height: auto; }}
+.cfg-loading {{ color: #666; font-size: 0.85rem; padding: 0.5rem; }}
+
+/* Why essay */
+.why-essay p {{
+    color: var(--text-muted);
+    font-size: 0.9375rem;
+    line-height: 1.7;
+    max-width: 65ch;
+    margin-bottom: 1rem;
 }}
-.cfg-loading {{
-    color: #666;
-    font-size: 0.85rem;
-    padding: 0.5rem;
+.why-essay strong {{ color: var(--text); }}
+.why-essay em {{ color: var(--text); font-style: italic; }}
+.why-essay code {{
+    font-family: var(--mono);
+    font-size: 0.85em;
+    background: var(--surface);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
 }}
 
-/* footer */
-.footer {{ color: var(--text-dim); font-size: 0.8rem; margin-top: 3rem; text-align: center; }}
+/* Footer */
+footer {{
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}}
+footer a {{ color: var(--accent); }}
 </style>
 </head>
 <body>
 
-<h1>pycfg-rs</h1>
-<p class="subtitle">Rust-based control flow graph generator for Python</p>
-<p class="intro">
-    This page shows the output of running
-    <a href="https://github.com/nwyin/pycfg-rs">pycfg-rs</a> against
-    {len(results)} popular open-source Python projects. For each project,
-    you can see analysis stats and the control flow graphs of the most
-    complex functions — expand any function to view its CFG.
-</p>
-<div class="meta">
-    <span>v{version}</span>
-    <span>commit <code>{sha}</code></span>
-    <span>generated {now}</span>
-</div>
+{hero}
+{corpus}
+{essay}
 
-<div class="stats">
-    <div class="stat-card"><div class="value">{total_files}</div><div class="label">Python files</div></div>
-    <div class="stat-card"><div class="value">{total_funcs:,}</div><div class="label">functions analyzed</div></div>
-    <div class="stat-card"><div class="value">{total_time:.0f}ms</div><div class="label">total parse time</div></div>
-    <div class="stat-card"><div class="value">{test_str}</div><div class="label">tests passing</div></div>
-    <div class="stat-card"><div class="value">{success_count}/{len(results)}</div><div class="label">projects passing</div></div>
-</div>
-
-<h2>Projects</h2>
-{project_sections}
-
-<div class="footer">
-    Generated by <a href="https://github.com/nwyin/pycfg-rs">pycfg-rs</a> &middot;
-    Powered by <a href="https://github.com/astral-sh/ruff">ruff_python_parser</a>
-</div>
+<footer>
+  <a href="https://github.com/nwyin/pycfg-rs">pycfg-rs</a> v{version}
+  &middot; commit <code>{sha}</code>
+  &middot; generated {now}
+  &middot; powered by <a href="https://github.com/astral-sh/ruff">ruff_python_parser</a>
+</footer>
 
 <script type="module">
 import {{ Graphviz }} from "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm@2.22.4/dist/graphviz.js";
 
 const graphviz = await Graphviz.load();
 
-// Render CFGs on demand when "Show CFG" is expanded
 document.querySelectorAll(".cfg-toggle").forEach(toggle => {{
     toggle.addEventListener("toggle", () => {{
         if (!toggle.open) return;
@@ -616,7 +893,6 @@ document.querySelectorAll(".cfg-toggle").forEach(toggle => {{
 </script>
 </body>
 </html>"""
-    return page_html
 
 
 # ---------------------------------------------------------------------------
@@ -625,21 +901,12 @@ document.querySelectorAll(".cfg-toggle").forEach(toggle => {{
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate pycfg-rs analysis report")
+    parser = argparse.ArgumentParser(description="Generate pycfg-rs product page + corpus report")
     parser.add_argument("--output", "-o", default="report/index.html", help="Output HTML file")
-    parser.add_argument("--skip-tests", action="store_true", help="Skip test count detection")
     args = parser.parse_args()
 
     binary = find_binary()
     print(f"Using binary: {binary}")
-
-    # Collect test count
-    test_count = None
-    if not args.skip_tests:
-        print("Counting tests...")
-        test_count = get_test_count()
-        if test_count:
-            print(f"  {test_count} tests")
 
     version = get_version()
     sha = get_git_sha()
@@ -665,7 +932,7 @@ def main():
     print(f"{dot_count} graphs")
 
     # Generate HTML
-    page_html = generate_html(results, test_count, version, sha)
+    page_html = generate_html(results, version, sha)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
