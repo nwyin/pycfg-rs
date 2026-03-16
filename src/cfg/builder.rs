@@ -1,10 +1,10 @@
 use ruff_python_ast::{self as ast, Stmt};
 use ruff_text_size::Ranged;
 
+use super::source_map::LineIndex;
 use super::{
     BasicBlock, BlockKind, CfgOptions, Edge, EdgeKind, FunctionCfg, Metrics, Statement, source_map,
 };
-use super::source_map::LineIndex;
 
 pub(crate) struct CfgBuilder<'src> {
     source: &'src str,
