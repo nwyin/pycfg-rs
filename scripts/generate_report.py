@@ -371,7 +371,7 @@ def _hero_html() -> str:
     <p class="section-desc">
       Speed measured on the <a href="https://github.com/Textualize/rich">rich</a> corpus (100 files, 984 functions).
       * python-graphs only analyzed 13% of files due to import requirements.
-      <a href="https://github.com/nwyin/pycfg-rs/blob/main/docs/roadmap.md">Roadmap and limitations.</a>
+      <a href="https://github.com/nwyin/pycfg-rs/blob/master/docs/roadmap.md">Roadmap and limitations.</a>
     </p>
     <table class="comparison-table">
       <thead>
