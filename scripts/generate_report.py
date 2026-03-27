@@ -98,54 +98,6 @@ Function: process (line 1)
 
   Metrics: 7 blocks, 8 edges, 2 branches, CC=4"""
 
-WHY_ESSAY = """\
-<p>
-LLMs struggle with control flow reasoning. Given a function with nested
-branches, exception handlers, and early returns, models mis-predict which
-paths are reachable, confuse exception routing with normal flow, and miss
-edge cases in <code>try</code>/<code>finally</code> blocks. The
-<a href="https://arxiv.org/abs/2501.16456">CoCoNUT benchmark</a> (2025)
-found that even the best model traced only 47% of control flow paths
-correctly, with accuracy dropping sharply as complexity increased. This is
-a representation problem &mdash; source code buries control flow in
-indentation and keywords. CFGs make it explicit.
-</p>
-
-<p>
-A control flow graph reduces a function to its structural skeleton: basic
-blocks connected by labeled edges. Instead of asking "what happens if
-<code>authenticate</code> raises?", an agent reads the graph and sees the
-edge directly: <em>Block 0 &rarr; Block 3 (exception: AuthError)</em>.
-Branches, loops, <code>break</code>/<code>continue</code>, and exception
-routing all become first-class, queryable structure.
-</p>
-
-<p>
-<strong>Cyclomatic complexity</strong> is the useful byproduct. CC = E &minus; N + 2
-counts the number of linearly independent paths through a function.
-A function with CC &gt; 15 has too many paths for a model to reason about
-in one pass. An agent that checks CC first can decide to decompose the
-function, or to focus its attention on the high-complexity branches,
-before attempting a change.
-</p>
-
-<p>
-The key design choice in pycfg-rs is <strong>machine-consumable output</strong>.
-The JSON format preserves block IDs, edge labels, statement text, and
-line numbers &mdash; everything an agent needs to cross-reference back to
-source. The text format is designed to be readable in a prompt without
-extra parsing. DOT output feeds into Graphviz for visual inspection.
-Three formats, one structural truth.
-</p>
-
-<p>
-Static analysis is not omniscient. <code>exec</code>, dynamic dispatch,
-and metaprogramming will always create blind spots. But for the
-overwhelmingly common case &mdash; regular Python functions with
-branches, loops, and exception handling &mdash; the CFG is exact,
-and it tells the model which code to reason about carefully.
-</p>"""
-
 
 # ---------------------------------------------------------------------------
 # Data collection
@@ -345,7 +297,6 @@ def _hero_html() -> str:
     <a href="#get-started">Get started</a>
     <a href="#comparison">Comparison</a>
     <a href="#corpus">Corpus results</a>
-    <a href="#why">Why CFGs?</a>
   </nav>
 
   <div class="section" id="get-started">
@@ -527,18 +478,6 @@ def _corpus_html(results: list[CorpusResult]) -> str:
 </section>"""
 
 
-# ---------------------------------------------------------------------------
-# Section 3: Essay
-# ---------------------------------------------------------------------------
-
-
-def _essay_html() -> str:
-    return f"""
-<section class="section why-essay" id="why">
-  <h2>Why machine-readable CFGs matter for LLM workflows</h2>
-  {WHY_ESSAY}
-</section>"""
-
 
 # ---------------------------------------------------------------------------
 # Full page assembly
@@ -550,7 +489,6 @@ def generate_html(results: list[CorpusResult], version: str, sha: str) -> str:
 
     hero = _hero_html()
     corpus = _corpus_html(results)
-    essay = _essay_html()
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -822,23 +760,6 @@ details[open] > .project-header::before {{ transform: rotate(90deg); }}
 .cfg-container svg {{ max-width: 100%; height: auto; }}
 .cfg-loading {{ color: #666; font-size: 0.85rem; padding: 0.5rem; }}
 
-/* Why essay */
-.why-essay p {{
-    color: var(--text-muted);
-    font-size: 0.9375rem;
-    line-height: 1.7;
-    max-width: 65ch;
-    margin-bottom: 1rem;
-}}
-.why-essay strong {{ color: var(--text); }}
-.why-essay em {{ color: var(--text); font-style: italic; }}
-.why-essay code {{
-    font-family: var(--mono);
-    font-size: 0.85em;
-    background: var(--surface);
-    padding: 0.1em 0.35em;
-    border-radius: 3px;
-}}
 
 /* Footer */
 footer {{
@@ -855,7 +776,6 @@ footer a {{ color: var(--accent); }}
 
 {hero}
 {corpus}
-{essay}
 
 <footer>
   <a href="https://github.com/nwyin/pycfg-rs">pycfg-rs</a> v{version}
